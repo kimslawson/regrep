@@ -13,11 +13,13 @@ from .base import (
     SnapshotProvider,
 )
 from .memento import MementoTimeMapProvider
+from .timetravel import TimeTravelProvider
 from .wayback import WaybackProvider
 
 PROVIDERS: dict[str, type[SnapshotProvider]] = {
     WaybackProvider.name: WaybackProvider,
     ArchiveTodayProvider.name: ArchiveTodayProvider,
+    TimeTravelProvider.name: TimeTravelProvider,
 }
 
 DEFAULT_PROVIDER = WaybackProvider.name
@@ -42,6 +44,7 @@ __all__ = [
     "ProviderError",
     "Snapshot",
     "SnapshotProvider",
+    "TimeTravelProvider",
     "WaybackProvider",
     "get_provider",
 ]

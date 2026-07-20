@@ -156,6 +156,25 @@ def test_limit_takes_earliest_n():
     assert [s.timestamp for s in snaps] == ["20100101000000", "20110101000000"]
 
 
+@responses.activate
+def test_duplicate_memento_urls_are_collapsed():
+    # Aggregated TimeMaps can list the same memento URL more than once.
+    dup = "https://tm.test/20130401000000/" + URL
+    responses.get(
+        ENDPOINT,
+        body=link_format(
+            URL,
+            [
+                ("Mon, 01 Apr 2013 00:00:00 GMT", dup),
+                ("Mon, 01 Apr 2013 00:00:00 GMT", dup),
+                ("Wed, 20 Jul 2022 10:30:00 GMT", "https://tm.test/20220720103000/" + URL),
+            ],
+        ),
+    )
+    snaps = provider().list_snapshots(URL)
+    assert [s.raw_url for s in snaps] == [dup, "https://tm.test/20220720103000/" + URL]
+
+
 def test_prefix_is_refused_without_a_request():
     with pytest.raises(ProviderError, match="prefix"):
         provider().list_snapshots(URL, prefix=True)

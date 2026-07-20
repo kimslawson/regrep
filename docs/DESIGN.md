@@ -139,13 +139,16 @@ it matches.
   truncation/coloring as normal output; `--json` emits one
   `timeline-segment` object per run.
 
-## Providers: Wayback (CDX) and archive.today (Memento)
+## Providers: Wayback (CDX) and the Memento family (archive.today, TimeTravel)
 
-The provider seam earns its keep with the second backend. archive.today is
-Memento-compliant (RFC 7089), so "archive.today support" is really "a Memento
-TimeMap provider, pointed at archive.today" — and that base (`memento.py`)
-is what makes the TimeTravel aggregator and other Memento archives cheap
-later.
+The provider seam earns its keep past the first backend. archive.today and
+TimeTravel are both Memento-compliant (RFC 7089), so each is "a Memento
+TimeMap provider, pointed at a different endpoint" — the base (`memento.py`)
+does the work, and the concrete providers (`archivetoday.py`,
+`timetravel.py`) are ~15 lines each. TimeTravel is the proof the abstraction
+generalized: adding an aggregator that fans out across *every* archive at
+once cost a subclass, one endpoint URL, and two small base refinements
+(below), not a rewrite.
 
 - **Shared HTTP, one code path.** Session construction (retry/backoff,
   `Retry-After`, pooling, User-Agent) and the size-capped, binary-aware,
@@ -182,6 +185,30 @@ later.
   returns `[]`; a response with no link-format markers raises a
   ProviderError that names bot-blocking as the likely cause.
 
+### TimeTravel: what an aggregator added to the base
+
+Building the aggregator surfaced two properties the base should have had, so
+they live in `MementoTimeMapProvider` and benefit every Memento provider:
+
+- **URL-level dedup.** An aggregated TimeMap routinely lists the *same*
+  memento URL from more than one upstream source. An identical URL is the
+  same capture, so `_dedupe_urls` keeps the first (after the chronological
+  sort, before range/limit) — otherwise duplicates would burn `--limit`
+  slots and print twice. (Digest dedup still can't apply; TimeMaps have no
+  digests.)
+- **Per-provider index timeout.** The base TimeMap request timeout is a class
+  attribute (`timemap_timeout`), so TimeTravel — which polls archives live
+  and is much slower than a single archive — raises the read half to 120s
+  without touching the shared request code.
+
+TimeTravel-specific behavior that is *documented, not worked around*: its
+mementos point at each source archive's own replay URL, so Wayback captures
+come back as replay pages with toolbar chrome (not `id_` raw bytes) — the
+docs steer anyone wanting pristine Wayback content to `--provider wayback`.
+Large aggregated TimeMaps are paginated via `rel="timemap"` links; regrep
+reads the first page (and `--limit` bounds it further). Following pagination
+is future work, not a correctness bug.
+
 ## Distribution
 
 PyPI publishing uses **trusted publishing** (OIDC via
@@ -197,10 +224,14 @@ The name `regrep` was unclaimed as of 2026-07; first tag push claims it.
   (documented in `--help` and README).
 - One URL per invocation; no stdin list of URLs yet.
 - No `-v/--invert-match`, `-C/--context`, or per-snapshot match counts yet.
-- Providers: Wayback and archive.today. The Memento base makes TimeTravel and
-  other RFC 7089 archives short to add.
-- archive.today: no dedupe (no digests), fetched pages include its wrapper
-  (no raw endpoint), no `--prefix`, and it may block automated access.
+- Providers: Wayback, archive.today, and TimeTravel. The Memento base makes
+  further RFC 7089 archives short to add.
+- Memento providers (archive.today, TimeTravel): no dedupe by content (no
+  digests), fetched pages include each archive's wrapper (no raw endpoint),
+  no `--prefix`.
+- archive.today may block automated access; TimeTravel is slow, mixes source
+  archives, and its large TimeMaps are read first-page-only (no pagination
+  following yet).
 - No response caching; identical repeat runs re-fetch (digest dedupe only
   helps within a run, and only for providers that supply digests).
 - Timeline change points are bracketed, not exact — a run of unchanged

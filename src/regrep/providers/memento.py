@@ -76,6 +76,9 @@ class MementoTimeMapProvider(HttpProvider):
 
     name = "memento"
     timemap_url = ""  # e.g. "https://archive.today/timemap/"; set by subclasses
+    # (connect, read) timeout for the TimeMap index request. Aggregators that
+    # poll archives live (TimeTravel) override the read half upward.
+    timemap_timeout: tuple[float, float] = (10, 60)
 
     def __init__(self, timemap_url: str | None = None):
         super().__init__()
@@ -100,7 +103,7 @@ class MementoTimeMapProvider(HttpProvider):
             )
         endpoint = self.timemap_url.rstrip("/") + "/" + url
         try:
-            resp = self._session().get(endpoint, timeout=(10, 60))
+            resp = self._session().get(endpoint, timeout=self.timemap_timeout)
             resp.raise_for_status()
         except requests.RequestException as exc:
             raise ProviderError(f"{self.name} TimeMap query failed: {exc}") from exc
@@ -118,6 +121,9 @@ class MementoTimeMapProvider(HttpProvider):
 
         original = original or url
         mementos.sort(key=lambda m: m[0])
+        # Aggregated TimeMaps (TimeTravel) can list the same memento URL more
+        # than once; an identical URL is the same capture, so keep one.
+        mementos = self._dedupe_urls(mementos)
         mementos = self._apply_range(mementos, from_ts, to_ts)
         if collapse:
             mementos = self._collapse(mementos, collapse)
@@ -150,6 +156,17 @@ class MementoTimeMapProvider(HttpProvider):
         # No mimetype from the TimeMap, so we can't pre-skip binaries; fetch
         # and let stream_text's NUL-byte check catch them.
         return stream_text(self._session(), snapshot.raw_url, timeout=timeout, max_bytes=max_bytes)
+
+    @staticmethod
+    def _dedupe_urls(mementos: list[tuple[str, str]]) -> list[tuple[str, str]]:
+        seen: set[str] = set()
+        kept: list[tuple[str, str]] = []
+        for ts, u in mementos:
+            if u in seen:
+                continue
+            seen.add(u)
+            kept.append((ts, u))
+        return kept
 
     @staticmethod
     def _apply_range(

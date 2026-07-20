@@ -118,7 +118,7 @@ emits one `timeline-segment` object per run.
 | `-l`, `--limit N` | Consider at most N snapshots (default 100, `0` = no limit). |
 | `--daily` / `--monthly` / `--yearly` | At most one snapshot per day/month/year. |
 | `--prefix` | Treat `URL` as a prefix and search everything archived under it (Wayback only). |
-| `--provider NAME` | Archive to search: `wayback` (default) or `archivetoday`. See [Providers](#providers). |
+| `--provider NAME` | Archive to search: `wayback` (default), `archivetoday`, or `timetravel`. See [Providers](#providers). |
 | `-w`, `--workers N` | Concurrent fetches (default 5 — be kind, the archive is a shared resource). |
 | `--timeout SECONDS` | Per-snapshot read timeout (default 30). |
 | `--max-size MB` | Skip snapshots larger than this (default 10). |
@@ -159,12 +159,14 @@ snapshots are capped rather than buffered forever.
 | --- | --- | --- |
 | `wayback` (default) | Internet Archive [CDX API](https://archive.org/developers/wayback-cdx-server.html) + `id_` raw fetch | Content digests (dedupe), server-side date/limit/collapse filtering, prefix search, and pristine original bytes. |
 | `archivetoday` | [archive.today](https://archive.today) via its [Memento](https://datatracker.ietf.org/doc/html/rfc7089) TimeMap | No digests, no raw-bytes endpoint (fetched pages include archive.today's wrapper — `--visible` helps), date/limit/collapse applied client-side, no `--prefix`. archive.today is bot-hostile (Cloudflare/CAPTCHAs), so expect the occasional blocked request, which regrep reports rather than hides. |
+| `timetravel` | [Memento TimeTravel](http://timetravel.mementoweb.org/) aggregator | Fans out across *many* archives at once (Wayback, archive.today, Archive-It, national/university libraries…). Same Memento traits as above, plus: mixed sources mean fetched content is whatever each archive serves (Wayback entries arrive as replay pages *with* chrome — use `--provider wayback` for pristine bytes); slower (polls archives live); very large TimeMaps are paginated and regrep reads the first page. |
 
 ```bash
 regrep --provider archivetoday 'quoted phrase' https://example.com/article
+regrep --provider timetravel --timeline 'headline' https://news.example.com/story
 ```
 
-Both providers feed the same engine, so `--visible`, `--timeline`, `--json`,
+All providers feed the same engine, so `--visible`, `--timeline`, `--json`,
 date ranges, and coloring all work identically regardless of archive.
 
 ## Architecture: built for more than one archive
@@ -182,26 +184,29 @@ providers/
   wayback.py     CDX index + id_ fetch
   memento.py     RFC 7089 TimeMap parser + provider (reusable Memento base)
   archivetoday.py  archive.today endpoint on top of memento.py
+  timetravel.py    TimeTravel aggregator endpoint on top of memento.py
 ```
 
 A provider implements two methods — `list_snapshots(url, ...)` and
 `fetch(snapshot)` — and registers itself in `providers/__init__.py`; the
-`--provider` flag picks it up automatically. The Memento base
-(`memento.py`) means the *next* [RFC 7089](https://datatracker.ietf.org/doc/html/rfc7089)
-archive — the TimeTravel aggregator, a national/academic web archive — is a
-few lines pointing at a different TimeMap endpoint.
+`--provider` flag picks it up automatically. Both `archivetoday.py` and
+`timetravel.py` are ~15-line subclasses of the shared
+[RFC 7089](https://datatracker.ietf.org/doc/html/rfc7089) Memento base
+(`memento.py`), each just pinning a TimeMap endpoint — that's the abstraction
+paying off.
 
 Self-hosted archives already work today: point
 `REGREP_WAYBACK_CDX_URL` / `REGREP_WAYBACK_WEB_URL` at any CDX-compatible
 server (e.g. [pywb](https://github.com/webrecorder/pywb)), or
-`REGREP_ARCHIVETODAY_TIMEMAP_URL` at any Memento TimeMap endpoint.
+`REGREP_ARCHIVETODAY_TIMEMAP_URL` / `REGREP_TIMETRAVEL_TIMEMAP_URL` at any
+Memento TimeMap endpoint.
 
 ## Roadmap
 
 - [x] Timeline / diff mode: when a phrase appeared and disappeared across snapshots (`--timeline`)
 - [x] PyPI release wired up (trusted-publisher auto-publish on version tags)
 - [x] archive.today provider (via a reusable Memento TimeMap base)
-- [ ] Memento TimeTravel aggregator (`--provider timetravel`) — now a short hop on `memento.py`
+- [x] Memento TimeTravel aggregator (`--provider timetravel`) — search many archives at once
 - [ ] Local snapshot caching (`requests-cache`/SQLite) so repeat searches are instant — deliberately deferred for now
 - [ ] `-v`/`--invert-match`, `-C`/`--context` (the short `-v` is reserved for this — grep users' fingers expect it)
 - [ ] `--newest` to scan most recent snapshots first

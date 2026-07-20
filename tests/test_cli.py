@@ -193,7 +193,31 @@ def test_unknown_provider_lists_choices(capsys):
         main(["needle", PAGE, "--provider", "bogus"])
     assert excinfo.value.code == 2
     err = capsys.readouterr().err
-    assert "archivetoday" in err and "wayback" in err
+    assert "archivetoday" in err and "wayback" in err and "timetravel" in err
+
+
+@responses.activate
+def test_provider_timetravel_end_to_end(capsys, monkeypatch):
+    monkeypatch.setenv("REGREP_TIMETRAVEL_TIMEMAP_URL", "https://tt.test/timemap/link/")
+    endpoint = "https://tt.test/timemap/link/" + PAGE
+    timemap = (
+        f'<{PAGE}>; rel="original",\n'
+        f'<https://web.archive.org/web/20130101000000/{PAGE}>; rel="first memento"; '
+        'datetime="Tue, 01 Jan 2013 00:00:00 GMT",\n'
+        f'<https://archive.ph/zzzz/{PAGE}>; rel="last memento"; '
+        'datetime="Wed, 20 Jul 2022 10:00:00 GMT"'
+    )
+    responses.get(endpoint, body=timemap)
+    responses.get(
+        f"https://web.archive.org/web/20130101000000/{PAGE}", body="<p>wayback needle</p>"
+    )
+    responses.get(f"https://archive.ph/zzzz/{PAGE}", body="<p>today needle</p>")
+    assert main(["needle", PAGE, "--provider", "timetravel", "--color", "never", "-q"]) == 0
+    out = capsys.readouterr().out
+    assert "wayback needle" in out and "today needle" in out
+    # Results span both source archives.
+    assert "web.archive.org/web/20130101000000" in out
+    assert "archive.ph/zzzz" in out
 
 
 @responses.activate
