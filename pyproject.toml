@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "regrep"
-version = "0.2.0"
+version = "0.3.0"
 description = "grep the history of the web: regex search across Wayback Machine snapshots of a URL"
 readme = "README.md"
 license = { file = "LICENSE" }

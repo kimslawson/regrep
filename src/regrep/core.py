@@ -22,6 +22,11 @@ class SearchOptions:
     limit: int | None = 100
     prefix: bool = False
     collapse: int | None = None
+    # Drop non-adjacent captures with an identical content digest. Right for
+    # match output (each distinct version shown once), but timeline mode turns
+    # this off: a phrase vanishing and later returning produces a repeated
+    # digest that must be kept for the reappearance to be detected.
+    dedupe: bool = True
 
 
 @dataclass(frozen=True)
@@ -35,6 +40,21 @@ class LineMatch:
 class SnapshotResult:
     snapshot: Snapshot
     lines: tuple[LineMatch, ...]
+
+
+@dataclass(frozen=True)
+class SnapshotPresence:
+    """Whether the pattern was present in one successfully-fetched snapshot.
+
+    Recorded for every readable snapshot (matching or not) so timeline mode
+    can see the absent states between matches. Unreadable snapshots (fetch
+    error, binary, too large) contribute no presence record — they tell us
+    nothing about whether the phrase was there.
+    """
+
+    snapshot: Snapshot
+    present: bool
+    sample: LineMatch | None = None  # first matching line, when present
 
 
 @dataclass
@@ -54,6 +74,10 @@ class SearchStats:
 class SearchOutcome:
     results: list[SnapshotResult]
     stats: SearchStats
+    # Every readable snapshot in chronological order, matching or not. Feeds
+    # timeline mode; empty-by-default keeps the common (results, stats)
+    # construction working.
+    presence: list[SnapshotPresence] = field(default_factory=list)
 
 
 def match_lines(text: str, regex: re.Pattern) -> list[LineMatch]:
@@ -115,11 +139,13 @@ def run_search(
         collapse=options.collapse,
     )
     stats.listed = len(snapshots)
-    snapshots, stats.duplicates = dedupe_snapshots(snapshots)
+    if options.dedupe:
+        snapshots, stats.duplicates = dedupe_snapshots(snapshots)
     if not snapshots:
         return SearchOutcome([], stats)
 
     results: list[SnapshotResult] = []
+    presence: list[SnapshotPresence] = []
     workers = max(1, min(options.workers, len(snapshots)))
     with ThreadPoolExecutor(max_workers=workers) as executor:
         futures = [
@@ -131,9 +157,13 @@ def run_search(
                 snapshot, status, payload = future.result()
                 stats.scanned += 1
                 if status is FetchStatus.OK:
-                    if payload:
+                    lines = tuple(payload)
+                    presence.append(
+                        SnapshotPresence(snapshot, bool(lines), lines[0] if lines else None)
+                    )
+                    if lines:
                         stats.matched += 1
-                        results.append(SnapshotResult(snapshot, tuple(payload)))
+                        results.append(SnapshotResult(snapshot, lines))
                 elif status is FetchStatus.ERROR:
                     stats.errors += 1
                     if len(stats.error_samples) < 5:
@@ -150,5 +180,10 @@ def run_search(
             executor.shutdown(wait=False, cancel_futures=True)
             raise
 
-    results.sort(key=lambda r: (r.snapshot.timestamp, r.snapshot.original_url))
-    return SearchOutcome(results, stats)
+    results.sort(key=lambda r: _chrono_key(r.snapshot))
+    presence.sort(key=lambda p: _chrono_key(p.snapshot))
+    return SearchOutcome(results, stats, presence)
+
+
+def _chrono_key(snapshot: Snapshot) -> tuple[str, str]:
+    return (snapshot.timestamp, snapshot.original_url)

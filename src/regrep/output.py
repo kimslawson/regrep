@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import IO
 
 from .core import SearchOutcome, SearchStats
+from .timeline import TimelineSegment
 
 ELLIPSIS = "…"
 
@@ -131,6 +132,91 @@ def print_json(outcome: SearchOutcome, out: IO | None = None) -> None:
                 "spans": [list(span) for span in match.spans],
             }
             print(json.dumps(record, ensure_ascii=False), file=out)
+
+
+def _bracket_note(segment: TimelineSegment) -> str:
+    """One line explaining when/how this segment's state began."""
+    if segment.prev_end is None:
+        if segment.present:
+            return (
+                f"present at the earliest snapshot ({segment.start.date_display}); "
+                "may predate the archive"
+            )
+        return f"absent at the earliest snapshot ({segment.start.date_display})"
+    verb = "appeared" if segment.present else "vanished"
+    prior = "absent" if segment.present else "present"
+    return (
+        f"{verb} between {segment.prev_end.date_display} ({prior}) "
+        f"and {segment.start.date_display}"
+    )
+
+
+def _print_segment(
+    segment: TimelineSegment, palette: Palette, out: IO, max_columns: int
+) -> None:
+    if segment.present:
+        sign, color, label = "+", palette.green, "present"
+    else:
+        sign, color, label = "-", palette.dim, "absent"
+    span = segment.start.date_display
+    if segment.end.timestamp != segment.start.timestamp:
+        span += f" → {segment.end.date_display}"
+    count = f"{segment.count} snapshot" + ("s" if segment.count != 1 else "")
+    print(
+        f"{color}{sign} {label:<7}{palette.reset} {color}{span}{palette.reset}"
+        f"  {palette.blue}({count}){palette.reset}",
+        file=out,
+    )
+    print(f"{palette.dim}    {_bracket_note(segment)}{palette.reset}", file=out)
+    if segment.present and segment.sample is not None:
+        rendered = render_line(
+            segment.sample.text.rstrip(), segment.sample.spans, palette, max_columns
+        )
+        print(f"    {palette.blue}{segment.sample.number}{palette.reset}:{rendered}", file=out)
+
+
+def print_timeline(
+    segments: list[TimelineSegment],
+    palette: Palette,
+    out: IO | None = None,
+    max_columns: int = 200,
+) -> None:
+    out = out if out is not None else sys.stdout
+    if not segments:
+        return
+    url = segments[0].start.original_url
+    print(f"{palette.bold}{palette.green}{url}{palette.reset}", file=out)
+    for segment in segments:
+        _print_segment(segment, palette, out, max_columns)
+    last = segments[-1]
+    state = "present" if last.present else "absent"
+    print(
+        f"{palette.dim}  → {state} as of {last.end.date_display}, "
+        f"the most recent snapshot checked{palette.reset}",
+        file=out,
+    )
+
+
+def print_timeline_json(segments: list[TimelineSegment], out: IO | None = None) -> None:
+    """One JSON object per timeline segment (NDJSON)."""
+    out = out if out is not None else sys.stdout
+    for segment in segments:
+        start, end = segment.start, segment.end
+        record = {
+            "type": "timeline-segment",
+            "present": segment.present,
+            "provider": start.provider,
+            "original_url": start.original_url,
+            "start_timestamp": start.timestamp,
+            "end_timestamp": end.timestamp,
+            "start_datetime": start.dt.isoformat() if start.dt else None,
+            "end_datetime": end.dt.isoformat() if end.dt else None,
+            "snapshot_count": segment.count,
+            "start_replay_url": start.replay_url,
+            "changed_after_timestamp": segment.prev_end.timestamp if segment.prev_end else None,
+            "sample_line": segment.sample.text if (segment.present and segment.sample) else None,
+        }
+        print(json.dumps(record, ensure_ascii=False), file=out)
 
 
 def summary_line(stats: SearchStats, elapsed: float) -> str:

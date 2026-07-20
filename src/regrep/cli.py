@@ -11,8 +11,16 @@ import time
 
 from . import __version__
 from .core import SearchOptions, run_search
-from .output import make_palette, print_json, print_results, summary_line
+from .output import (
+    make_palette,
+    print_json,
+    print_results,
+    print_timeline,
+    print_timeline_json,
+    summary_line,
+)
 from .providers import DEFAULT_PROVIDER, PROVIDERS, ProviderError, get_provider
+from .timeline import build_timeline
 
 MAX_WORKERS = 32  # hard ceiling; archives are a shared resource
 
@@ -155,6 +163,13 @@ def build_parser() -> argparse.ArgumentParser:
 
     output = parser.add_argument_group("output")
     output.add_argument(
+        "--timeline",
+        action="store_true",
+        help="instead of listing every match, report when the pattern appeared "
+        "and vanished across snapshots (keeps duplicate captures so a "
+        "reappearance is detected); exit 0 if it was ever present",
+    )
+    output.add_argument(
         "--max-columns",
         type=nonnegative_int,
         default=200,
@@ -206,6 +221,9 @@ def main(argv=None) -> int:
         limit=args.limit or None,
         prefix=args.prefix,
         collapse=args.collapse,
+        # Timeline needs to see a phrase come back, which shows up as a
+        # repeated content digest; deduping those would hide the reappearance.
+        dedupe=not args.timeline,
     )
 
     chatty = not args.quiet
@@ -234,7 +252,14 @@ def main(argv=None) -> int:
         print("\r\033[K", end="", file=sys.stderr, flush=True)
 
     try:
-        if args.json:
+        if args.timeline:
+            segments = build_timeline(outcome.presence)
+            if args.json:
+                print_timeline_json(segments)
+            else:
+                palette = make_palette(args.color, sys.stdout)
+                print_timeline(segments, palette, max_columns=args.max_columns)
+        elif args.json:
             print_json(outcome)
         else:
             palette = make_palette(args.color, sys.stdout)

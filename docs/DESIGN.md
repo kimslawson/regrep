@@ -102,6 +102,49 @@ severity:
   overrides `REGREP_WAYBACK_CDX_URL`/`REGREP_WAYBACK_WEB_URL` exist so
   end-to-end runs can target a local stub or a self-hosted pywb.
 
+## Timeline / diff mode (`--timeline`)
+
+The feature that most distinguishes regrep from "grep, but slower over the
+network": answering *when* a phrase appeared and disappeared, not just where
+it matches.
+
+- **Presence, not just matches.** `run_search` records a `SnapshotPresence`
+  (present/absent + a sample line) for every *readable* snapshot, not only
+  matching ones — the absent captures are what make a timeline. Unreadable
+  snapshots (fetch error, binary, oversize) contribute no record: they tell
+  us nothing about whether the phrase was there, so they become gaps rather
+  than false "absent" states. This lives in `core` and is populated always;
+  it's cheap (a bool + one line reference per snapshot).
+- **Segments carry their boundary.** `timeline.build_timeline` collapses the
+  chronological presence list into alternating present/absent runs. Each
+  segment keeps `prev_end` — the last snapshot of the preceding opposite run
+  — so a change is *bracketed* honestly ("appeared between X and Y") rather
+  than pinned to a single instant the archive never actually captured.
+- **Dedupe must be state-aware.** The client-side digest dedupe (great for
+  match output: show each distinct version once) is *wrong* for timelines: a
+  phrase that vanishes and returns produces a repeated digest, and dropping
+  it would erase the reappearance. So `SearchOptions.dedupe` is `False` in
+  timeline mode. Server-side `collapse=digest` stays on in both modes — it
+  only removes *adjacent* identical captures, which are the same state
+  continuing (no transition lost), and every retained capture becomes a
+  candidate transition point. The trade-off: the exact last-seen instant
+  within an unchanged run is approximated, which the bracketing already
+  makes explicit.
+- **Exit code.** `0` if the pattern was ever present, else `1` — the natural
+  grep-shaped reading of "did you find it in this URL's history?"
+- **Rendering reuses `render_line`** so sample matches get the same
+  truncation/coloring as normal output; `--json` emits one
+  `timeline-segment` object per run.
+
+## Distribution
+
+PyPI publishing uses **trusted publishing** (OIDC via
+`pypa/gh-action-pypi-publish`), so no long-lived API token is stored in the
+repo. `release.yml` fires on `v*` tags, verifies the tag equals the version
+in both `pyproject.toml` and `__init__.py` (a guard against half-bumped
+releases), builds sdist + wheel, and publishes from a `pypi` environment.
+The name `regrep` was unclaimed as of 2026-07; first tag push claims it.
+
 ## Known limitations (candidates for future work)
 
 - `--visible` line numbers index the extracted text, not the HTML source
@@ -111,3 +154,6 @@ severity:
 - Wayback is the only provider; TimeTravel/archive.today are roadmap.
 - No response caching; identical repeat runs re-fetch (digest dedupe only
   helps within a run).
+- Timeline change points are bracketed, not exact — a run of unchanged
+  captures is collapsed server-side, so the true last-seen moment before a
+  change is only known to within one snapshot interval.

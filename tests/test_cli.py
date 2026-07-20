@@ -148,3 +148,60 @@ def test_limit_flag_reaches_cdx_query(capsys):
     responses.get(CDX_URL, body="[]")
     main(["needle", PAGE, "-l", "7", "-q"])
     assert "limit=7" in responses.calls[0].request.url
+
+
+@responses.activate
+def test_timeline_reports_appear_and_vanish(capsys):
+    mock_history(
+        {
+            "20180101000000": "<p>nothing yet</p>",
+            "20190101000000": "<p>the needle arrives</p>",
+            "20200101000000": "<p>needle still here</p>",
+            "20210101000000": "<p>gone again</p>",
+        }
+    )
+    assert main(["needle", PAGE, "--timeline", "--color", "never", "-q"]) == 0
+    out = capsys.readouterr().out
+    assert "+ present" in out
+    assert "- absent" in out
+    assert "appeared between" in out
+    assert "vanished between" in out
+
+
+@responses.activate
+def test_timeline_exit_one_when_never_present(capsys):
+    mock_history({"20200101000000": "<p>no match here</p>"})
+    assert main(["needle", PAGE, "--timeline", "-q"]) == 1
+
+
+@responses.activate
+def test_timeline_json_emits_segment_records(capsys):
+    mock_history(
+        {
+            "20180101000000": "<p>nope</p>",
+            "20190101000000": "<p>needle</p>",
+        }
+    )
+    assert main(["needle", PAGE, "--timeline", "--json", "-q"]) == 0
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [r["type"] for r in records] == ["timeline-segment", "timeline-segment"]
+    assert records[-1]["present"] is True
+
+
+@responses.activate
+def test_timeline_keeps_duplicate_digests_for_reappearance(capsys):
+    # Same content (digest DUP) at t1 and t3, different content at t2. Normal
+    # dedupe would drop the t3 duplicate; --timeline must keep it so the
+    # phrase's reappearance is detected.
+    rows = [
+        ["20200101000000", PAGE, "text/html", "200", "DUP"],
+        ["20210101000000", PAGE, "text/html", "200", "GONE"],
+        ["20220101000000", PAGE, "text/html", "200", "DUP"],
+    ]
+    responses.get(CDX_URL, body=cdx_payload(rows))
+    responses.get(raw_url("20200101000000", PAGE), body="<p>needle</p>", content_type="text/html")
+    responses.get(raw_url("20210101000000", PAGE), body="<p>vanished</p>", content_type="text/html")
+    responses.get(raw_url("20220101000000", PAGE), body="<p>needle</p>", content_type="text/html")
+    assert main(["needle", PAGE, "--timeline", "--json", "-q"]) == 0
+    records = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert [r["present"] for r in records] == [True, False, True]
