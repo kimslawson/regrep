@@ -188,6 +188,56 @@ def test_timeline_json_emits_segment_records(capsys):
     assert records[-1]["present"] is True
 
 
+def test_unknown_provider_lists_choices(capsys):
+    with pytest.raises(SystemExit) as excinfo:
+        main(["needle", PAGE, "--provider", "bogus"])
+    assert excinfo.value.code == 2
+    err = capsys.readouterr().err
+    assert "archivetoday" in err and "wayback" in err
+
+
+@responses.activate
+def test_provider_archivetoday_end_to_end(capsys, monkeypatch):
+    monkeypatch.setenv("REGREP_ARCHIVETODAY_TIMEMAP_URL", "https://at.test/timemap/")
+    endpoint = "https://at.test/timemap/" + PAGE
+    timemap = (
+        f'<{PAGE}>; rel="original",\n'
+        f'<https://archive.ph/1111/{PAGE}>; rel="first memento"; '
+        'datetime="Mon, 01 Apr 2013 00:00:00 GMT",\n'
+        f'<https://archive.ph/2222/{PAGE}>; rel="last memento"; '
+        'datetime="Wed, 20 Jul 2022 10:00:00 GMT"'
+    )
+    responses.get(endpoint, body=timemap)
+    responses.get(f"https://archive.ph/1111/{PAGE}", body="<p>old needle</p>")
+    responses.get(f"https://archive.ph/2222/{PAGE}", body="<p>new needle</p>")
+    assert main(["needle", PAGE, "--provider", "archivetoday", "--color", "never", "-q"]) == 0
+    out = capsys.readouterr().out
+    assert "old needle" in out and "new needle" in out
+    assert "archive.ph/1111" in out  # memento URL shown as the source link
+
+
+@responses.activate
+def test_provider_archivetoday_timeline(capsys, monkeypatch):
+    monkeypatch.setenv("REGREP_ARCHIVETODAY_TIMEMAP_URL", "https://at.test/timemap/")
+    endpoint = "https://at.test/timemap/" + PAGE
+    timemap = (
+        f'<{PAGE}>; rel="original",\n'
+        f'<https://archive.ph/1111/{PAGE}>; rel="first memento"; '
+        'datetime="Mon, 01 Apr 2018 00:00:00 GMT",\n'
+        f'<https://archive.ph/2222/{PAGE}>; rel="memento"; '
+        'datetime="Tue, 01 Apr 2019 00:00:00 GMT",\n'
+        f'<https://archive.ph/3333/{PAGE}>; rel="last memento"; '
+        'datetime="Thu, 01 Apr 2021 00:00:00 GMT"'
+    )
+    responses.get(endpoint, body=timemap)
+    responses.get(f"https://archive.ph/1111/{PAGE}", body="<p>nothing yet</p>")
+    responses.get(f"https://archive.ph/2222/{PAGE}", body="<p>needle appears</p>")
+    responses.get(f"https://archive.ph/3333/{PAGE}", body="<p>it was removed</p>")
+    assert main(["needle", PAGE, "--provider", "archivetoday", "--timeline", "-q"]) == 0
+    out = capsys.readouterr().out
+    assert "appeared between" in out and "vanished between" in out
+
+
 @responses.activate
 def test_timeline_keeps_duplicate_digests_for_reappearance(capsys):
     # Same content (digest DUP) at t1 and t3, different content at t2. Normal

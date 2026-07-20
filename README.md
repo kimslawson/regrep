@@ -68,6 +68,9 @@ regrep -i -F '$99' --prefix https://example.com/plans
 # Timeline mode: when did a phrase appear and vanish?
 regrep --timeline 'deprecated_function\(\)' https://developer.example.com/docs
 
+# Search a different archive
+regrep --provider archivetoday 'headline text' https://news.example.com/story
+
 # Machine-readable output for scripting
 regrep --json 'needle' https://example.com | jq .replay_url
 ```
@@ -114,8 +117,8 @@ emits one `timeline-segment` object per run.
 | `--from DATE`, `--to DATE` | Only consider snapshots in this range. Accepts `YYYY`, `YYYY-MM`, `YYYY-MM-DD`, or a full 14-digit timestamp. |
 | `-l`, `--limit N` | Consider at most N snapshots (default 100, `0` = no limit). |
 | `--daily` / `--monthly` / `--yearly` | At most one snapshot per day/month/year. |
-| `--prefix` | Treat `URL` as a prefix and search everything archived under it. |
-| `--provider NAME` | Archive to search (default: `wayback`). |
+| `--prefix` | Treat `URL` as a prefix and search everything archived under it (Wayback only). |
+| `--provider NAME` | Archive to search: `wayback` (default) or `archivetoday`. See [Providers](#providers). |
 | `-w`, `--workers N` | Concurrent fetches (default 5 — be kind, the archive is a shared resource). |
 | `--timeout SECONDS` | Per-snapshot read timeout (default 30). |
 | `--max-size MB` | Skip snapshots larger than this (default 10). |
@@ -150,39 +153,56 @@ Character encodings are detected when snapshots don't declare one (old pages
 lie constantly), binary content is detected and skipped, and oversized
 snapshots are capped rather than buffered forever.
 
+## Providers
+
+| Provider | Backend | Notes |
+| --- | --- | --- |
+| `wayback` (default) | Internet Archive [CDX API](https://archive.org/developers/wayback-cdx-server.html) + `id_` raw fetch | Content digests (dedupe), server-side date/limit/collapse filtering, prefix search, and pristine original bytes. |
+| `archivetoday` | [archive.today](https://archive.today) via its [Memento](https://datatracker.ietf.org/doc/html/rfc7089) TimeMap | No digests, no raw-bytes endpoint (fetched pages include archive.today's wrapper — `--visible` helps), date/limit/collapse applied client-side, no `--prefix`. archive.today is bot-hostile (Cloudflare/CAPTCHAs), so expect the occasional blocked request, which regrep reports rather than hides. |
+
+```bash
+regrep --provider archivetoday 'quoted phrase' https://example.com/article
+```
+
+Both providers feed the same engine, so `--visible`, `--timeline`, `--json`,
+date ranges, and coloring all work identically regardless of archive.
+
 ## Architecture: built for more than one archive
 
-The Wayback Machine is the first backend, not the only one. Everything above
-the network is provider-agnostic:
+Everything above the network is provider-agnostic:
 
 ```
-cli.py        argument parsing, exit codes
-core.py       dedupe → concurrent fetch → match → chronological order
-extract.py    --visible text extraction
-timeline.py   appeared/vanished segments for --timeline
-output.py     terminal/JSON rendering
+cli.py           argument parsing, exit codes
+core.py          dedupe → concurrent fetch → match → chronological order
+extract.py       --visible text extraction
+timeline.py      appeared/vanished segments for --timeline
+output.py        terminal/JSON rendering
 providers/
-  base.py     Snapshot + SnapshotProvider interface (the seam)
-  wayback.py  CDX index + id_ fetch implementation
+  base.py        Snapshot + SnapshotProvider seam; shared HTTP (session, stream_text)
+  wayback.py     CDX index + id_ fetch
+  memento.py     RFC 7089 TimeMap parser + provider (reusable Memento base)
+  archivetoday.py  archive.today endpoint on top of memento.py
 ```
 
 A provider implements two methods — `list_snapshots(url, ...)` and
 `fetch(snapshot)` — and registers itself in `providers/__init__.py`; the
-`--provider` flag picks it up automatically. Planned next, per
-[RFC 7089 (Memento)](https://datatracker.ietf.org/doc/html/rfc7089):
-archive.today, the Memento TimeTravel aggregator, and national/academic web
-archives.
+`--provider` flag picks it up automatically. The Memento base
+(`memento.py`) means the *next* [RFC 7089](https://datatracker.ietf.org/doc/html/rfc7089)
+archive — the TimeTravel aggregator, a national/academic web archive — is a
+few lines pointing at a different TimeMap endpoint.
 
 Self-hosted archives already work today: point
 `REGREP_WAYBACK_CDX_URL` / `REGREP_WAYBACK_WEB_URL` at any CDX-compatible
-server (e.g. [pywb](https://github.com/webrecorder/pywb)).
+server (e.g. [pywb](https://github.com/webrecorder/pywb)), or
+`REGREP_ARCHIVETODAY_TIMEMAP_URL` at any Memento TimeMap endpoint.
 
 ## Roadmap
 
 - [x] Timeline / diff mode: when a phrase appeared and disappeared across snapshots (`--timeline`)
 - [x] PyPI release wired up (trusted-publisher auto-publish on version tags)
+- [x] archive.today provider (via a reusable Memento TimeMap base)
+- [ ] Memento TimeTravel aggregator (`--provider timetravel`) — now a short hop on `memento.py`
 - [ ] Local snapshot caching (`requests-cache`/SQLite) so repeat searches are instant — deliberately deferred for now
-- [ ] More Memento providers: archive.today, TimeTravel aggregator
 - [ ] `-v`/`--invert-match`, `-C`/`--context` (the short `-v` is reserved for this — grep users' fingers expect it)
 - [ ] `--newest` to scan most recent snapshots first
 - [ ] Multiple URLs / a URL list on stdin

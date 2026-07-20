@@ -80,11 +80,14 @@ severity:
   web-archive-specific reason not to.
 - **Provider seam.** `providers/base.py` defines `Snapshot` (provider,
   timestamp, original/raw/replay URLs, digest, mimetype) and
-  `SnapshotProvider` (`list_snapshots`, `fetch`). `core.py` knows nothing
-  about Wayback. New archives register in `providers/__init__.PROVIDERS` and
-  appear in `--provider` automatically. Capability hints a backend can't
-  honor (e.g. `collapse` on non-CDX archives) may be ignored rather than
-  faked.
+  `SnapshotProvider` (`list_snapshots`, `fetch`), plus shared HTTP
+  (`HttpProvider`, `build_session`, `stream_text`). `core.py` knows nothing
+  about any specific archive. New archives register in
+  `providers/__init__.PROVIDERS` and appear in `--provider` automatically. A
+  capability the backend lacks is either honored client-side where that's
+  faithful (Memento does its own `from/to/limit/collapse`) or refused with a
+  clear error where faking it would mislead (`--prefix` on a per-URL
+  TimeMap) — never silently ignored in a way that returns wrong results.
 - **Timestamps stay provider-native strings** (Wayback: `YYYYMMDDhhmmss`),
   which sort lexically; `Snapshot.dt` derives a datetime for display. A
   future provider with a different native format must emit something
@@ -136,6 +139,49 @@ it matches.
   truncation/coloring as normal output; `--json` emits one
   `timeline-segment` object per run.
 
+## Providers: Wayback (CDX) and archive.today (Memento)
+
+The provider seam earns its keep with the second backend. archive.today is
+Memento-compliant (RFC 7089), so "archive.today support" is really "a Memento
+TimeMap provider, pointed at archive.today" — and that base (`memento.py`)
+is what makes the TimeTravel aggregator and other Memento archives cheap
+later.
+
+- **Shared HTTP, one code path.** Session construction (retry/backoff,
+  `Retry-After`, pooling, User-Agent) and the size-capped, binary-aware,
+  charset-correct fetch (`stream_text`) moved to `providers/base.py` when the
+  second provider arrived, rather than being copied. Wayback and Memento both
+  use `HttpProvider._session()` + `stream_text`; Wayback keeps only its
+  extra pre-fetch mimetype skip (it has the mimetype from CDX; Memento does
+  not).
+- **What a TimeMap can't give you** shaped the `Snapshot` contract from the
+  start, which is why nothing in `core`/`output`/`timeline` needed changing:
+  - *No digest* → `Snapshot.digest is None`; `dedupe_snapshots` is already a
+    no-op when digests are absent, so no identical-content collapsing (we
+    can't know equality without fetching). Timeline mode is unaffected — it
+    keys on fetched presence, not digests.
+  - *No raw-bytes endpoint* → `raw_url == replay_url` (the memento URL);
+    fetched content includes archive.today's chrome. `--visible` mitigates,
+    and the caveat is documented rather than hidden.
+  - *No mimetype* → every capture is fetched and NUL-byte-checked; nothing to
+    pre-skip.
+- **Client-side selection.** A TimeMap returns every capture at once, so
+  `from/to/limit/collapse` are applied in the provider after parsing. Partial
+  date bounds are padded for lexical comparison (`from="2023"` →
+  `20230000000000`, `to="2023"` → `20239999999999`). `--prefix` has no
+  TimeMap equivalent, so it *raises* rather than silently returning
+  whole-URL results — a wrong answer to an explicit request is worse than an
+  error.
+- **The comma problem.** Link-format separates entries with commas, but RFC
+  1123 datetimes (`"Mon, 01 Apr 2013 ..."`) contain them too. The parser
+  splits only on a comma that begins a new link (`,\s*(?=<)`) and pulls
+  `datetime`/`rel` from quoted params, so an internal date comma never splits
+  an entry. `parse_timemap` is a pure function, tested independently of HTTP.
+- **Telling "no captures" from "blocked."** archive.today fronts Cloudflare;
+  a challenge page is not a TimeMap. An empty-but-valid TimeMap (has `rel=`)
+  returns `[]`; a response with no link-format markers raises a
+  ProviderError that names bot-blocking as the likely cause.
+
 ## Distribution
 
 PyPI publishing uses **trusted publishing** (OIDC via
@@ -151,9 +197,12 @@ The name `regrep` was unclaimed as of 2026-07; first tag push claims it.
   (documented in `--help` and README).
 - One URL per invocation; no stdin list of URLs yet.
 - No `-v/--invert-match`, `-C/--context`, or per-snapshot match counts yet.
-- Wayback is the only provider; TimeTravel/archive.today are roadmap.
+- Providers: Wayback and archive.today. The Memento base makes TimeTravel and
+  other RFC 7089 archives short to add.
+- archive.today: no dedupe (no digests), fetched pages include its wrapper
+  (no raw endpoint), no `--prefix`, and it may block automated access.
 - No response caching; identical repeat runs re-fetch (digest dedupe only
-  helps within a run).
+  helps within a run, and only for providers that supply digests).
 - Timeline change points are bracketed, not exact — a run of unchanged
   captures is collapsed server-side, so the true last-seen moment before a
   change is only known to within one snapshot interval.

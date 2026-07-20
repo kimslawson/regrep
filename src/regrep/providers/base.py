@@ -8,13 +8,21 @@ aggregator, ...) means implementing this interface and registering it in
 `regrep.providers.PROVIDERS`.
 """
 
+import threading
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
 from datetime import datetime
 from enum import Enum
 
+import requests
+from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
+
+from .. import __version__
+
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024  # refuse to buffer snapshots larger than this
 DEFAULT_TIMEOUT = 30.0  # per-snapshot read timeout, seconds
+USER_AGENT = f"regrep/{__version__} (+https://github.com/kimslawson/regrep)"
 
 # Content types that cannot meaningfully be grepped as text. Anything not
 # matched here is fetched and NUL-byte-checked as a backstop.
@@ -110,6 +118,73 @@ def decode_bytes(raw: bytes, declared_encoding: str | None = None) -> str:
     return raw.decode("utf-8", errors="replace")
 
 
+def build_session() -> requests.Session:
+    """A requests session with polite retry/backoff and an identifying UA.
+
+    Retries on 429/502/503/504 with exponential backoff and honors
+    `Retry-After`; archives are a shared resource and rate-limit accordingly.
+    """
+    session = requests.Session()
+    retry = Retry(
+        total=3,
+        connect=3,
+        read=2,
+        backoff_factor=1.5,
+        status_forcelist=(429, 502, 503, 504),
+        allowed_methods=("GET", "HEAD"),
+        respect_retry_after_header=True,
+    )
+    adapter = HTTPAdapter(max_retries=retry, pool_connections=4, pool_maxsize=4)
+    session.mount("https://", adapter)
+    session.mount("http://", adapter)
+    session.headers["User-Agent"] = USER_AGENT
+    return session
+
+
+def stream_text(
+    session: requests.Session,
+    url: str,
+    *,
+    timeout: float = DEFAULT_TIMEOUT,
+    max_bytes: int = DEFAULT_MAX_BYTES,
+) -> "FetchResult":
+    """Fetch `url` as text: size-capped streaming, binary + charset handling.
+
+    Shared by every HTTP provider so size limits, binary detection, and the
+    "don't trust requests' ISO-8859-1 default" charset rule live in one place.
+    """
+    try:
+        resp = session.get(url, timeout=(10, timeout), stream=True)
+    except requests.RequestException as exc:
+        return FetchResult(FetchStatus.ERROR, detail=str(exc))
+
+    with resp:
+        if resp.status_code != 200:
+            return FetchResult(FetchStatus.ERROR, detail=f"HTTP {resp.status_code}")
+        length = resp.headers.get("Content-Length", "")
+        if length.isdigit() and int(length) > max_bytes:
+            return FetchResult(FetchStatus.TOO_LARGE, detail=f"{length} bytes")
+        chunks: list[bytes] = []
+        size = 0
+        try:
+            for chunk in resp.iter_content(chunk_size=65536):
+                size += len(chunk)
+                if size > max_bytes:
+                    return FetchResult(FetchStatus.TOO_LARGE, detail=f">{max_bytes} bytes")
+                chunks.append(chunk)
+        except requests.RequestException as exc:
+            return FetchResult(FetchStatus.ERROR, detail=str(exc))
+        content_type = resp.headers.get("Content-Type", "")
+        # Trust the charset only when one is actually declared; requests
+        # otherwise "defaults" text/* to ISO-8859-1, garbling old UTF-8 pages.
+        declared = resp.encoding if "charset=" in content_type.lower() else None
+
+    raw = b"".join(chunks)
+    if looks_binary(raw):
+        return FetchResult(FetchStatus.BINARY)
+    return FetchResult(FetchStatus.OK, text=decode_bytes(raw, declared))
+
+
 class SnapshotProvider(ABC):
     """Interface every archive backend implements."""
 
@@ -145,3 +220,21 @@ class SnapshotProvider(ABC):
         max_bytes: int = DEFAULT_MAX_BYTES,
     ) -> FetchResult:
         """Retrieve the raw archived content of one snapshot as text."""
+
+
+class HttpProvider(SnapshotProvider):
+    """Base for providers that talk HTTP, with a pooled, retrying session.
+
+    `requests.Session` is not guaranteed thread-safe, so each worker thread
+    gets its own session (all built identically via `build_session`).
+    """
+
+    def __init__(self) -> None:
+        self._local = threading.local()
+
+    def _session(self) -> requests.Session:
+        session = getattr(self._local, "session", None)
+        if session is None:
+            session = build_session()
+            self._local.session = session
+        return session

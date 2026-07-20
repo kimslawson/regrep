@@ -39,6 +39,11 @@ def make_snapshot(
 @pytest.fixture(autouse=True)
 def _clean_environment(monkeypatch):
     """Keep host environment from bleeding into URL and color decisions."""
-    for name in ("REGREP_WAYBACK_CDX_URL", "REGREP_WAYBACK_WEB_URL", "NO_COLOR"):
+    for name in (
+        "REGREP_WAYBACK_CDX_URL",
+        "REGREP_WAYBACK_WEB_URL",
+        "REGREP_ARCHIVETODAY_TIMEMAP_URL",
+        "NO_COLOR",
+    ):
         monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("TERM", "xterm-256color")
